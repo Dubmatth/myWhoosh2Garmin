@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MyWhoosh2Garmin/MyWhoosh2Garmin.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MyWhoosh2Garmin.Tests/MyWhoosh2Garmin.Tests.csproj" />
+  </Folder>
+</Solution>
