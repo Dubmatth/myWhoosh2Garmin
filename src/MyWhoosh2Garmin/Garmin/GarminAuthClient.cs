@@ -66,4 +66,86 @@ public class GarminAuthClient
         return body.RootElement.GetProperty("serviceTicketId").GetString()
             ?? throw new GarminSsoException("Aucun ticket de service dans la réponse SSO Garmin.");
     }
+
+    private const string OAuthConsumerUrl = "https://thegarth.s3.amazonaws.com/oauth_consumer.json";
+    private (string Key, string Secret)? _cachedConsumer;
+
+    private async Task<(string Key, string Secret)> GetOAuthConsumerAsync(CancellationToken cancellationToken)
+    {
+        if (_cachedConsumer is not null)
+            return _cachedConsumer.Value;
+
+        using var response = await _httpClient.GetAsync(OAuthConsumerUrl, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken);
+        _cachedConsumer = (json.GetProperty("consumer_key").GetString()!, json.GetProperty("consumer_secret").GetString()!);
+        return _cachedConsumer.Value;
+    }
+
+    public async Task<OAuth1Token> GetOAuth1TokenAsync(string ticket, CancellationToken cancellationToken)
+    {
+        var (consumerKey, consumerSecret) = await GetOAuthConsumerAsync(cancellationToken);
+
+        string baseUrl = "https://connectapi.garmin.com/oauth-service/oauth/preauthorized";
+        var queryParams = new Dictionary<string, string>
+        {
+            ["ticket"] = ticket,
+            ["login-url"] = ServiceUrl,
+            ["accepts-mfa-tokens"] = "true",
+        };
+
+        string authHeader = GarminOAuth1Signer.BuildAuthorizationHeader(
+            "GET", baseUrl, queryParams, consumerKey, consumerSecret,
+            token: null, tokenSecret: null,
+            nonce: Guid.NewGuid().ToString("N"),
+            unixTimestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+        string url = baseUrl + "?" + string.Join("&", queryParams.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Authorization", authHeader);
+        request.Headers.UserAgent.ParseAdd("com.garmin.android.apps.connectmobile");
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        string body2 = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        var parsed = System.Web.HttpUtility.ParseQueryString(body2);
+        string? oauthToken = parsed["oauth_token"];
+        string? oauthTokenSecret = parsed["oauth_token_secret"];
+        if (oauthToken is null || oauthTokenSecret is null)
+            throw new GarminSsoException("Réponse OAuth1 Garmin incomplète.");
+
+        return new OAuth1Token(oauthToken, oauthTokenSecret);
+    }
+
+    public async Task<OAuth2Token> ExchangeForAccessTokenAsync(OAuth1Token oauth1, CancellationToken cancellationToken)
+    {
+        var (consumerKey, consumerSecret) = await GetOAuthConsumerAsync(cancellationToken);
+
+        string baseUrl = "https://connectapi.garmin.com/oauth-service/oauth/exchange/user/2.0";
+        var formParams = new Dictionary<string, string> { ["audience"] = "GARMIN_CONNECT_MOBILE_ANDROID_DI" };
+
+        string authHeader = GarminOAuth1Signer.BuildAuthorizationHeader(
+            "POST", baseUrl, formParams, consumerKey, consumerSecret,
+            oauth1.OAuthToken, oauth1.OAuthTokenSecret,
+            nonce: Guid.NewGuid().ToString("N"),
+            unixTimestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, baseUrl)
+        {
+            Content = new FormUrlEncodedContent(formParams),
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", authHeader);
+        request.Headers.UserAgent.ParseAdd("com.garmin.android.apps.connectmobile");
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken);
+        string accessToken = json.GetProperty("access_token").GetString()!;
+        string tokenType = json.GetProperty("token_type").GetString()!;
+        int expiresIn = json.GetProperty("expires_in").GetInt32();
+
+        return new OAuth2Token(accessToken, tokenType, DateTimeOffset.UtcNow.AddSeconds(expiresIn));
+    }
 }
