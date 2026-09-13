@@ -31,3 +31,8 @@ Ces étapes nécessitent un vrai compte Garmin et une vraie séance MyWhoosh —
 Si l'upload échoue, le message de log indiquera quelle hypothèse (le format JSON exact
 de la réponse Garmin, dans `GarminUploadClient`) ne correspond pas à la réalité — c'est
 le seul endroit du projet où un ajustement basé sur la vraie réponse du serveur est attendu.
+
+## Limitations connues
+
+Voir la section "Limitations connues" du [README](../README.md) pour le détail complet
+(métriques d'entraînement Garmin manquantes, MFA par code uniquement, API non-officielle, etc.).
