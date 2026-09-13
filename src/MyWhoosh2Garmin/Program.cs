@@ -53,7 +53,8 @@ async Task RunLoginCommandAsync()
     var tokenStore = new MacKeychainTokenStore(new SystemProcessRunner());
 
     Console.WriteLine("Connexion à Garmin...");
-    string ticket = await authClient.LoginAndGetTicketAsync(email, password, CancellationToken.None);
+    string ticket = await authClient.LoginAndGetTicketAsync(
+        email, password, PromptMfaCodeAsync, CancellationToken.None);
     OAuth1Token oauth1 = await authClient.GetOAuth1TokenAsync(ticket, CancellationToken.None);
 
     // Confirms the token pair actually works before saving it.
@@ -61,6 +62,13 @@ async Task RunLoginCommandAsync()
 
     await tokenStore.SaveOAuth1TokenAsync(oauth1);
     Console.WriteLine("Compte Garmin lié avec succès. Le service peut maintenant tourner en tâche de fond.");
+}
+
+Task<string> PromptMfaCodeAsync()
+{
+    Console.Write("Code de vérification Garmin (reçu par email/SMS) : ");
+    string code = Console.ReadLine() ?? throw new InvalidOperationException("Code de vérification requis.");
+    return Task.FromResult(code);
 }
 
 string ReadPasswordMasked()

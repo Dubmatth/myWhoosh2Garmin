@@ -15,7 +15,8 @@ public class GarminAuthClient
         _httpClient = httpClient;
     }
 
-    public async Task<string> LoginAndGetTicketAsync(string email, string password, CancellationToken cancellationToken)
+    public async Task<string> LoginAndGetTicketAsync(
+        string email, string password, Func<Task<string>> promptMfaCode, CancellationToken cancellationToken)
     {
         // Sets SSO cookies used by the following request; failures here are non-fatal.
         try
@@ -29,8 +30,8 @@ public class GarminAuthClient
             // Best-effort; the login POST below still works without it in most cases.
         }
 
-        string loginUrl =
-            $"https://sso.garmin.com/mobile/api/login?clientId={ClientId}&locale=en-US&service={Uri.EscapeDataString(ServiceUrl)}";
+        string loginParams = $"clientId={ClientId}&locale=en-US&service={Uri.EscapeDataString(ServiceUrl)}";
+        string loginUrl = $"https://sso.garmin.com/mobile/api/login?{loginParams}";
 
         using var loginRequest = new HttpRequestMessage(HttpMethod.Post, loginUrl)
         {
@@ -49,20 +50,67 @@ public class GarminAuthClient
         JsonDocument body = await response.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken)
             ?? throw new GarminSsoException("Réponse SSO Garmin vide.");
 
-        string responseType = body.RootElement
-            .GetProperty("responseStatus")
-            .GetProperty("type")
-            .GetString() ?? "UNKNOWN";
+        string responseType = body.RootElement.GetProperty("responseStatus").GetProperty("type").GetString() ?? "UNKNOWN";
 
-        if (responseType != "SUCCESSFUL")
+        if (responseType == "SUCCESSFUL")
+            return ExtractServiceTicket(body);
+
+        if (responseType == "MFA_REQUIRED")
+            return await CompleteMfaChallengeAsync(body, loginParams, promptMfaCode, cancellationToken);
+
+        throw new GarminSsoException($"Échec de connexion Garmin : {ExtractStatusMessage(body, responseType)}");
+    }
+
+    private async Task<string> CompleteMfaChallengeAsync(
+        JsonDocument loginResponseBody, string loginParams, Func<Task<string>> promptMfaCode, CancellationToken cancellationToken)
+    {
+        string mfaMethod = "email";
+        if (loginResponseBody.RootElement.TryGetProperty("customerMfaInfo", out var mfaInfo)
+            && mfaInfo.TryGetProperty("mfaLastMethodUsed", out var methodProp)
+            && methodProp.GetString() is { } method)
         {
-            string message = body.RootElement.TryGetProperty("responseStatus", out var status)
-                              && status.TryGetProperty("message", out var msg)
-                ? msg.GetString() ?? responseType
-                : responseType;
-            throw new GarminSsoException($"Échec de connexion Garmin : {message}");
+            mfaMethod = method;
         }
 
+        string code = await promptMfaCode();
+
+        string verifyUrl = $"https://sso.garmin.com/mobile/api/mfa/verifyCode?{loginParams}";
+        using var verifyRequest = new HttpRequestMessage(HttpMethod.Post, verifyUrl)
+        {
+            Content = JsonContent.Create(new
+            {
+                mfaMethod,
+                mfaVerificationCode = code,
+                rememberMyBrowser = false,
+                reconsentList = Array.Empty<string>(),
+                mfaSetup = false,
+            }),
+        };
+
+        using var verifyResponse = await _httpClient.SendAsync(verifyRequest, cancellationToken);
+        verifyResponse.EnsureSuccessStatusCode();
+
+        JsonDocument verifyBody = await verifyResponse.Content.ReadFromJsonAsync<JsonDocument>(cancellationToken: cancellationToken)
+            ?? throw new GarminSsoException("Réponse de vérification MFA Garmin vide.");
+
+        string verifyType = verifyBody.RootElement.GetProperty("responseStatus").GetProperty("type").GetString() ?? "UNKNOWN";
+        if (verifyType != "SUCCESSFUL")
+            throw new GarminSsoException($"Échec de vérification du code MFA : {ExtractStatusMessage(verifyBody, verifyType)}");
+
+        return ExtractServiceTicket(verifyBody);
+    }
+
+    private static string ExtractStatusMessage(JsonDocument body, string fallback)
+    {
+        return body.RootElement.TryGetProperty("responseStatus", out var status)
+                          && status.TryGetProperty("message", out var msg)
+                          && !string.IsNullOrEmpty(msg.GetString())
+            ? msg.GetString()!
+            : fallback;
+    }
+
+    private static string ExtractServiceTicket(JsonDocument body)
+    {
         return body.RootElement.GetProperty("serviceTicketId").GetString()
             ?? throw new GarminSsoException("Aucun ticket de service dans la réponse SSO Garmin.");
     }
