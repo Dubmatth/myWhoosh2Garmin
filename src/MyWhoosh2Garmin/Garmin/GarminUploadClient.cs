@@ -34,12 +34,6 @@ public class GarminUploadClient
         using var doc = JsonDocument.Parse(body);
         var detailedResult = doc.RootElement.GetProperty("detailedImportResult");
 
-        if (detailedResult.TryGetProperty("successes", out var successes) && successes.GetArrayLength() > 0)
-        {
-            string activityId = successes[0].GetProperty("internalId").ToString();
-            return new UploadResult(UploadOutcome.Uploaded, activityId, null);
-        }
-
         if (detailedResult.TryGetProperty("failures", out var failures) && failures.GetArrayLength() > 0)
         {
             var failure = failures[0];
@@ -51,6 +45,16 @@ public class GarminUploadClient
                 : new UploadResult(UploadOutcome.Failed, null, message);
         }
 
-        return new UploadResult(UploadOutcome.Failed, null, $"Réponse Garmin inattendue : {body}");
+        // No failures reported: verified against a real account that Garmin can accept the
+        // file while leaving "successes" empty too — absence of a failure is the reliable
+        // success signal, not a populated "successes" entry. Prefer the per-activity
+        // internalId when present, falling back to the upload's own id otherwise.
+        string? activityId = detailedResult.TryGetProperty("successes", out var successes) && successes.GetArrayLength() > 0
+            ? successes[0].GetProperty("internalId").ToString()
+            : detailedResult.TryGetProperty("uploadId", out var uploadIdProp)
+                ? uploadIdProp.ToString()
+                : null;
+
+        return new UploadResult(UploadOutcome.Uploaded, activityId, null);
     }
 }
